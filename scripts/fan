@@ -1,0 +1,64 @@
+#!/bin/sh
+# fan - manual fan control for the BC-250 (NCT6686, CPU_FAN1 = fan2 / pwm2)
+#
+# Usage:
+#   fan 95      set fan to 95% speed (stops the fan-curve daemon)
+#   fan auto    re-enable the automatic fan-curve daemon
+#   fan status  show current temperature / PWM / RPM
+#
+# Examples:
+#   fan 50      half speed
+#   fan 100     full blast
+#   fan auto    back to temperature-controlled curve
+#
+# Most users run this through doas/sudo:  doas fan 60
+
+HWMON_NCT=$(grep -l nct6686 /sys/class/hwmon/hwmon*/name 2>/dev/null | head -1 | xargs dirname)
+[ -n "$HWMON_NCT" ] || { echo "error: nct6686 hwmon not found (is the nct6687 module loaded?)"; exit 1; }
+
+PWM="$HWMON_NCT/pwm2"        # CPU_FAN1 header
+EN="$HWMON_NCT/pwm2_enable"  # 1 = manual, 2 = BIOS/auto
+RPM="$HWMON_NCT/fan2_input"
+HWMON_AMD=$(grep -l amdgpu /sys/class/hwmon/hwmon*/name 2>/dev/null | head -1 | xargs dirname)
+TEMP="$HWMON_AMD/temp1_input"  # GPU edge sensor, millidegrees C
+SVC=bc250-fan-curve            # the curve daemon that must not fight us
+
+case "$1" in
+    ""|status)
+        printf "gpu edge : %s C\n" "$(( $(cat "$TEMP") / 1000 ))"
+        printf "pwm      : %s/255 (%d%%)\n" "$(cat "$PWM")" "$(( $(cat "$PWM") * 100 / 255 ))"
+        printf "rpm      : %s\n" "$(cat "$RPM")"
+        if command -v rc-service >/dev/null 2>&1; then
+            MODE=$(rc-service $SVC status >/dev/null 2>&1 && echo "curve daemon running" || echo "manual")
+        else
+            MODE=$(systemctl is-active $SVC >/dev/null 2>&1 && echo "curve daemon running" || echo "manual")
+        fi
+        printf "mode     : enable=%s (%s)\n" "$(cat "$EN")" "$MODE"
+        ;;
+    auto)
+        if command -v rc-service >/dev/null 2>&1; then
+            rc-service "$SVC" start && echo "fan curve daemon started"
+        else
+            systemctl start "$SVC" && echo "fan curve daemon started"
+        fi
+        ;;
+    [0-9]*)
+        pct=$1
+        [ "$pct" -le 100 ] || { echo "error: 0-100 expected, got '$pct'"; exit 1; }
+        # stop the daemon first, otherwise it overwrites our value in 2 seconds
+        if command -v rc-service >/dev/null 2>&1; then
+            rc-service "$SVC" status >/dev/null 2>&1 && rc-service "$SVC" stop
+        else
+            systemctl stop "$SVC" 2>/dev/null
+        fi
+        echo 1 > "$EN"                       # manual mode
+        echo $(( pct * 255 / 100 )) > "$PWM" # percent -> PWM duty 0-255
+        sleep 1
+        echo "fan set to ${pct}% (pwm $(cat "$PWM"), $(cat "$RPM") rpm)"
+        echo "back to automatic: fan auto"
+        ;;
+    *)
+        echo "usage: doas fan {0-100|auto|status}"
+        exit 1
+        ;;
+esac

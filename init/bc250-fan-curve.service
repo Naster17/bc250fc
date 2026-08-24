@@ -1,0 +1,15 @@
+# systemd unit for the bc250-fan-curve daemon (Fedora, Bazzite, Arch, ...)
+# Install to /etc/systemd/system/ and: systemctl enable --now bc250-fan-curve
+
+[Unit]
+Description=BC-250 temperature-based fan curve daemon
+After=multi-user.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/bc250-fan-curve
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,12 @@
+#!/sbin/openrc-run
+# OpenRC service for the bc250-fan-curve daemon (Alpine, Gentoo, ...)
+
+name="bc250-fan-curve"
+description="BC-250 temperature-based fan curve daemon"
+command="/usr/local/bin/bc250-fan-curve"
+command_background="yes"
+pidfile="/run/bc250-fan-curve.pid"
+
+depend() {
+    after local
+}

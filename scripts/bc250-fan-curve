@@ -1,0 +1,51 @@
+#!/bin/sh
+# bc250-fan-curve - automatic fan control daemon for the BC-250 board.
+#
+# The board's fan header (CPU_FAN1) is driven by a Nuvoton NCT6686D SuperIO
+# chip. The out-of-tree "nct6687" module (loaded with force=true) exposes it
+# as hwmon device "nct6686" with pwm2 = CPU_FAN1 duty cycle (0-255).
+#
+# Run this daemon under an init system (OpenRC unit in init/, systemd unit
+# in init/) and it maps the GPU edge temperature to a PWM duty cycle every
+# 2 seconds.
+#
+# Manual override: fan <0-100>   (see scripts/fan)
+# Back to auto:    fan auto
+
+# Locate hwmon devices dynamically (numbering changes between boots):
+# - amdgpu hwmon: temp1_input = GPU edge temperature, millidegrees C
+# - nct6686 hwmon: pwm2 controls the CPU_FAN1 header, fan2_input reads RPM
+HWMON_AMD=$(grep -l amdgpu /sys/class/hwmon/hwmon*/name | head -1 | xargs dirname)
+HWMON_NCT=$(grep -l nct6686 /sys/class/hwmon/hwmon*/name | head -1 | xargs dirname)
+[ -z "$HWMON_AMD" ] || [ -z "$HWMON_NCT" ] && exit 1
+
+PWM="$HWMON_NCT/pwm2"
+EN="$HWMON_NCT/pwm2_enable"   # 1 = manual, 2 = BIOS/auto
+RPM="$HWMON_NCT/fan2_input"
+TEMP="$HWMON_AMD/temp1_input"
+# Make sure the PWM channel is in manual mode (daemon owns it now)
+[ "$(cat "$EN")" = "1" ] && echo 1 > "$EN"
+
+# Temperature (integer °C) -> PWM duty (0-255).
+# Edit these numbers to taste: left side = temp thresholds,
+# right side = fan duty (255 = 100%, ~4300 rpm on a typical fan).
+# The final else branch is the hot path: never lower it, it is the
+# safety ramp for 80°C+.
+curve() {
+    t=$1
+    if    [ "$t" -lt 40 ]; then echo 90     # < 40°C: quiet (~35%)
+    elif  [ "$t" -lt 50 ]; then echo 110    # 40-49°C: ~43%
+    elif  [ "$t" -lt 60 ]; then echo 140    # 50-59°C: ~55%
+    elif  [ "$t" -lt 70 ]; then echo 175    # 60-69°C: ~69%
+    elif  [ "$t" -lt 80 ]; then echo 215    # 70-79°C: ~84%
+    else                       echo 255     # >= 80°C: 100%
+    fi
+}
+
+# Main loop: read GPU temp, clamp to the curve, write PWM every 2 s.
+# Emergency override: at 95°C+ force 100% regardless of the curve.
+while :; do
+    t=$(( $(cat "$TEMP") / 1000 ))
+    [ "$t" -gt 95 ] && echo 255 > "$PWM" || echo "$(curve "$t")" > "$PWM"
+    sleep 2
+done
