@@ -70,7 +70,7 @@ watch -n 1 'fan status'
 
 ## Fan channels on the board
 
-The NCT6686D exposes 8 PWM channels; on the BC-250 five of them are wired:
+The NCT6686D exposes 8 PWM channels; on the BC-250 five of them are wired. Besides the main **CPU_FAN1** 4-pin header, the pins right next to it form the **J4003** multi-fan header (silkscreened `J4003`, pins labeled `F1T`–`F5T` / `F1P`–`F5P` / `DET` / `GND`) — all five of its fan pins are controllable:
 
 | Channel | Connected to | Notes |
 |---------|--------------|-------|
