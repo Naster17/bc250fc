@@ -4,6 +4,8 @@
 # The board's fan header (CPU_FAN1) is driven by a Nuvoton NCT6686D SuperIO
 # chip. The out-of-tree "nct6687" module (loaded with force=true) exposes it
 # as hwmon device "nct6686" with pwm2 = CPU_FAN1 duty cycle (0-255).
+# The J4003 multi-fan header pins map to pwm1 and pwm3-pwm5; this daemon
+# only manages CPU_FAN1 (pwm2) and leaves the other channels alone.
 #
 # Run this daemon under an init system (OpenRC unit in init/, systemd unit
 # in init/) and it maps the GPU edge temperature to a PWM duty cycle every

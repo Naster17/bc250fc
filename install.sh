@@ -3,14 +3,16 @@
 #
 # What it does:
 #   1. Checks for the nct6687 driver; builds it from Fred78290/nct6687d
-#      if the kernel does not ship it (needs git, make, gcc, kernel headers).
+#      if the kernel does not ship it (installs build deps automatically
+#      on Alpine, Debian/Ubuntu, Fedora and Arch-based distros).
 #   2. Loads nct6687 with force=true and blacklists the read-only nct6683.
 #   3. Makes the module load persistent.
 #   4. Installs the fan scripts and the init service (OpenRC or systemd).
 #
 # Run as root:  doas sh install.sh   (or sudo sh install.sh)
 #
-# Tested on Alpine Linux (OpenRC). Systemd path is provided but untested.
+# Verified on Alpine Linux. Debian, Fedora and Arch paths are standard
+# but may need the kernel headers package matching your running kernel.
 
 set -e
 
@@ -30,16 +32,47 @@ elif [ -f "/lib/modules/$KERNEL/kernel/drivers/hwmon/nct6687.ko" ] || \
      modprobe nct6687 force=true 2>/dev/null; then
     echo "kernel ships nct6687"
 else
+    # Install build tools + kernel headers with whatever package manager exists
+    PKG=""
+    for c in apk apt-get dnf pacman; do
+        command -v "$c" >/dev/null 2>&1 && { PKG="$c"; break; }
+    done
+    [ -n "$PKG" ] || { echo "error: no supported package manager (apk/apt/dnf/pacman)"; exit 1; }
+
+    case "$PKG" in
+        apk)     PKGS="git make gcc linux-headers lm-sensors" ;;
+        apt-get) PKGS="git make gcc linux-headers-amd64 lm-sensors" ;;
+        dnf)     PKGS="git make gcc kernel-devel kernel-headers lm_sensors" ;;
+        pacman)  PKGS="git make gcc linux-headers lm_sensors" ;;
+    esac
+
+    if ! [ -d "/lib/modules/$KERNEL/build" ]; then
+        echo "installing build dependencies: $PKGS"
+        case "$PKG" in
+            apk)     apk add $PKGS ;;
+            apt-get) apt-get update && apt-get install -y $PKGS ;;
+            dnf)     dnf install -y $PKGS ;;
+            pacman)  pacman -Sy --needed --noconfirm $PKGS ;;
+        esac
+    fi
+
+    [ -d "/lib/modules/$KERNEL/build" ] || {
+        echo "error: kernel headers for $KERNEL not found."
+        echo "On Fedora install: sudo dnf install kernel-devel-$(uname -r)"
+        echo "On Debian/Ubuntu:  sudo apt install linux-headers-$(uname -r)"
+        echo "On Arch:           sudo pacman -S linux-headers (match your kernel package)"
+        exit 1
+    }
+
     echo "building out-of-tree nct6687d ..."
     command -v git make gcc >/dev/null || \
-        { echo "error: git, make and gcc are required (plus kernel headers)"; exit 1; }
-    [ -d /lib/modules/$KERNEL/build ] || \
-        { echo "error: kernel headers for $KERNEL not found (/lib/modules/$KERNEL/build)"; exit 1; }
+        { echo "error: git, make and gcc are required"; exit 1; }
     git clone --depth 1 https://github.com/Fred78290/nct6687d /tmp/nct6687d
     make -C /tmp/nct6687d
     # nct6683 claims the same chip; swap the drivers
     rmmod nct6683 2>/dev/null || true
     insmod /tmp/nct6687d/"$KERNEL"/nct6687.ko force=true
+    mkdir -p /lib/modules/$KERNEL/kernel/drivers/hwmon
     cp /tmp/nct6687d/"$KERNEL"/nct6687.ko /lib/modules/$KERNEL/kernel/drivers/hwmon/
     depmod -a
 fi

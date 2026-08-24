@@ -1,64 +1,95 @@
 #!/bin/sh
-# fan - manual fan control for the BC-250 (NCT6686, CPU_FAN1 = fan2 / pwm2)
+# fan - manual fan control for the BC-250 (NCT6686 Super I/O, nct6687 driver)
+#
+# The board has one 4-pin header (CPU_FAN1) plus the J4003 multi-fan header
+# (5 fan signals). Under Linux they map to PWM channels 1-5:
+#
+#   pwm2 = CPU_FAN1 (the main 4-pin header, "Pump Fan" in sensors output)
+#   pwm1, pwm3..pwm5 = the J4003 fan pins (see docs for the pin map)
 #
 # Usage:
-#   fan 95      set fan to 95% speed (stops the fan-curve daemon)
-#   fan auto    re-enable the automatic fan-curve daemon
-#   fan status  show current temperature / PWM / RPM
+#   fan                  show status of all channels
+#   fan <percent>        set CPU_FAN1 (pwm2) speed, 0-100
+#   fan <channel> <percent>
+#                        set channel 1-8 to percent, e.g.: fan 3 60
+#   fan auto             re-enable the automatic fan-curve daemon
 #
 # Examples:
-#   fan 50      half speed
-#   fan 100     full blast
-#   fan auto    back to temperature-controlled curve
-#
-# Most users run this through doas/sudo:  doas fan 60
+#   doas fan 50          half speed on CPU_FAN1
+#   doas fan 100         full blast
+#   doas fan 3 40        J4003 fan on channel 3 to 40%
+#   doas fan auto        back to temperature-controlled curve
 
 HWMON_NCT=$(grep -l nct6686 /sys/class/hwmon/hwmon*/name 2>/dev/null | head -1 | xargs dirname)
 [ -n "$HWMON_NCT" ] || { echo "error: nct6686 hwmon not found (is the nct6687 module loaded?)"; exit 1; }
 
-PWM="$HWMON_NCT/pwm2"        # CPU_FAN1 header
-EN="$HWMON_NCT/pwm2_enable"  # 1 = manual, 2 = BIOS/auto
-RPM="$HWMON_NCT/fan2_input"
-HWMON_AMD=$(grep -l amdgpu /sys/class/hwmon/hwmon*/name 2>/dev/null | head -1 | xargs dirname)
-TEMP="$HWMON_AMD/temp1_input"  # GPU edge sensor, millidegrees C
-SVC=bc250-fan-curve            # the curve daemon that must not fight us
+SVC=bc250-fan-curve  # the curve daemon (owns pwm2) that must not fight us
+MAIN_CH=2            # CPU_FAN1
+
+svc_running() {
+    if command -v rc-service >/dev/null 2>&1; then
+        rc-service "$SVC" status >/dev/null 2>&1
+    else
+        systemctl is-active "$SVC" >/dev/null 2>&1
+    fi
+}
+
+svc_stop() {
+    if command -v rc-service >/dev/null 2>&1; then
+        rc-service "$SVC" stop >/dev/null 2>&1
+    else
+        systemctl stop "$SVC" 2>/dev/null
+    fi
+}
+
+svc_start() {
+    if command -v rc-service >/dev/null 2>&1; then
+        rc-service "$SVC" start
+    else
+        systemctl start "$SVC"
+    fi
+}
+
+set_ch() { # $1 = channel, $2 = percent
+    ch=$1; pct=$2
+    [ "$ch" -ge 1 ] && [ "$ch" -le 8 ] || { echo "error: channel 1-8 expected, got '$ch'"; exit 1; }
+    [ "$pct" -le 100 ] || { echo "error: percent 0-100 expected, got '$pct'"; exit 1; }
+    # stop the daemon first, otherwise it overwrites pwm2 within 2 seconds
+    svc_running && svc_stop
+    echo 1 > "$HWMON_NCT/pwm${ch}_enable"          # manual mode
+    echo $(( pct * 255 / 100 )) > "$HWMON_NCT/pwm$ch"  # percent -> duty 0-255
+    sleep 1
+    echo "pwm$ch set to ${pct}% ($(cat "$HWMON_NCT/pwm$ch")/255, $(cat "$HWMON_NCT/fan${ch}_input" 2>/dev/null || echo '?') rpm)"
+    echo "back to automatic (CPU_FAN1): doas fan auto"
+}
 
 case "$1" in
     ""|status)
-        printf "gpu edge : %s C\n" "$(( $(cat "$TEMP") / 1000 ))"
-        printf "pwm      : %s/255 (%d%%)\n" "$(cat "$PWM")" "$(( $(cat "$PWM") * 100 / 255 ))"
-        printf "rpm      : %s\n" "$(cat "$RPM")"
-        if command -v rc-service >/dev/null 2>&1; then
-            MODE=$(rc-service $SVC status >/dev/null 2>&1 && echo "curve daemon running" || echo "manual")
-        else
-            MODE=$(systemctl is-active $SVC >/dev/null 2>&1 && echo "curve daemon running" || echo "manual")
-        fi
-        printf "mode     : enable=%s (%s)\n" "$(cat "$EN")" "$MODE"
+        HWMON_AMD=$(grep -l amdgpu /sys/class/hwmon/hwmon*/name 2>/dev/null | head -1 | xargs dirname)
+        [ -n "$HWMON_AMD" ] && printf "gpu edge : %s C\n" "$(( $(cat "$HWMON_AMD/temp1_input") / 1000 ))"
+        for ch in 1 2 3 4 5 6 7 8; do
+            pwm=$(cat "$HWMON_NCT/pwm$ch" 2>/dev/null) || continue
+            rpm=$(cat "$HWMON_NCT/fan${ch}_input" 2>/dev/null)
+            en=$(cat "$HWMON_NCT/pwm${ch}_enable" 2>/dev/null)
+            label="J4003 fan"
+            [ "$ch" = "$MAIN_CH" ] && label="CPU_FAN1"
+            printf "pwm%s (%-9s): %3s/255 (%2d%%)%s rpm=%-6s enable=%s\n" \
+                "$ch" "$label" "$pwm" "$(( pwm * 100 / 255 ))" "$( [ "$rpm" != "0" ] && echo "" || echo "   ")" "$rpm" "$en"
+        done
+        svc_running && echo "mode: curve daemon running (pwm$MAIN_CH)" || echo "mode: manual"
         ;;
     auto)
-        if command -v rc-service >/dev/null 2>&1; then
-            rc-service "$SVC" start && echo "fan curve daemon started"
-        else
-            systemctl start "$SVC" && echo "fan curve daemon started"
-        fi
+        svc_start && echo "fan curve daemon started"
         ;;
     [0-9]*)
-        pct=$1
-        [ "$pct" -le 100 ] || { echo "error: 0-100 expected, got '$pct'"; exit 1; }
-        # stop the daemon first, otherwise it overwrites our value in 2 seconds
-        if command -v rc-service >/dev/null 2>&1; then
-            rc-service "$SVC" status >/dev/null 2>&1 && rc-service "$SVC" stop
+        if [ -n "$2" ]; then
+            set_ch "$1" "$2"    # fan <channel> <percent>
         else
-            systemctl stop "$SVC" 2>/dev/null
+            set_ch "$MAIN_CH" "$1"  # fan <percent> -> CPU_FAN1
         fi
-        echo 1 > "$EN"                       # manual mode
-        echo $(( pct * 255 / 100 )) > "$PWM" # percent -> PWM duty 0-255
-        sleep 1
-        echo "fan set to ${pct}% (pwm $(cat "$PWM"), $(cat "$RPM") rpm)"
-        echo "back to automatic: fan auto"
         ;;
     *)
-        echo "usage: doas fan {0-100|auto|status}"
+        echo "usage: doas fan [status | auto | <0-100> | <channel 1-8> <0-100>]"
         exit 1
         ;;
 esac
