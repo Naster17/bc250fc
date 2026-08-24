@@ -44,10 +44,10 @@ curve() {
     fi
 }
 
-# Main loop: read GPU temp, clamp to the curve, write PWM every 2 s.
+# Main loop: read GPU temp, clamp to the curve, write PWM every 1 s.
 # Emergency override: at 95°C+ force 100% regardless of the curve.
 while :; do
     t=$(( $(cat "$TEMP") / 1000 ))
     [ "$t" -gt 95 ] && echo 255 > "$PWM" || echo "$(curve "$t")" > "$PWM"
-    sleep 2
+    sleep 1
 done

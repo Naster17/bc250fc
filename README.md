@@ -21,7 +21,7 @@ The fans are driven by a Nuvoton NCT6686D Super I/O chip. The in-kernel `nct6683
 
 | File | Purpose |
 |------|---------|
-| `scripts/bc250-fan-curve` | Daemon: maps GPU edge temperature → CPU_FAN1 PWM every 2 s, with a 95 °C+ full-speed emergency override |
+| `scripts/bc250-fan-curve` | Daemon: maps GPU edge temperature → CPU_FAN1 PWM every 1 s, with a 95 °C+ full-speed emergency override |
 | `scripts/fan` | CLI: `fan 60` (CPU_FAN1 to 60 %), `fan 3 40` (J4003 channel 3 to 40 %), `fan status`, `fan auto` |
 | `init/bc250-fan-curve.openrc` | OpenRC service (Alpine, Gentoo) |
 | `init/bc250-fan-curve.service` | systemd unit (Fedora, Bazzite, Arch, Debian, ...) |
