@@ -7,6 +7,8 @@ After=multi-user.target
 
 [Service]
 Type=simple
+RuntimeDirectory=bc250-fan
+RuntimeDirectoryMode=0755
 ExecStart=/usr/local/bin/bc250-fan-curve
 Restart=on-failure
 RestartSec=5

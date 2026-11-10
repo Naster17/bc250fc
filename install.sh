@@ -92,6 +92,7 @@ log "3/4 fan scripts"
 
 install -m755 "$REPO_DIR/scripts/bc250-fan-curve" /usr/local/bin/bc250-fan-curve
 install -m755 "$REPO_DIR/scripts/fan" /usr/local/bin/fan
+install -d -m755 /run/bc250-fan
 
 # ---------------------------------------------------------------------------
 log "4/4 init service"

@@ -7,6 +7,11 @@ command="/usr/local/bin/bc250-fan-curve"
 command_background="yes"
 pidfile="/run/bc250-fan-curve.pid"
 
+start_pre() {
+    mkdir -p /run/bc250-fan
+    chmod 0755 /run/bc250-fan
+}
+
 depend() {
     after local
 }

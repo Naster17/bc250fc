@@ -12,19 +12,25 @@
 #   fan <percent>        set CPU_FAN1 (pwm2) speed, 0-100
 #   fan <channel> <percent>
 #                        set channel 1-8 to percent, e.g.: fan 3 60
-#   fan auto             re-enable the automatic fan-curve daemon
+#   fan auto             hand CPU_FAN1 back to the automatic fan curve
 #
 # Examples:
 #   doas fan 50          half speed on CPU_FAN1
 #   doas fan 100         full blast
 #   doas fan 3 40        J4003 fan on channel 3 to 40%
 #   doas fan auto        back to temperature-controlled curve
+#
+# CPU_FAN1 requests are sent to the bc250-fan-curve daemon through
+# /run/bc250-fan/control, so the daemon remains the only pwm2 writer.  The
+# Decky plugin uses the same control file.
 
 HWMON_NCT=$(grep -l nct6686 /sys/class/hwmon/hwmon*/name 2>/dev/null | head -1 | xargs dirname)
 [ -n "$HWMON_NCT" ] || { echo "error: nct6686 hwmon not found (is the nct6687 module loaded?)"; exit 1; }
 
-SVC=bc250-fan-curve  # the curve daemon (owns pwm2) that must not fight us
+SVC=bc250-fan-curve  # the curve daemon (owns pwm2)
 MAIN_CH=2            # CPU_FAN1
+CONTROL_DIR=${BC250_FAN_CONTROL_DIR:-/run/bc250-fan}
+CONTROL="$CONTROL_DIR/control"
 
 svc_running() {
     if command -v rc-service >/dev/null 2>&1; then
@@ -34,39 +40,64 @@ svc_running() {
     fi
 }
 
-svc_stop() {
+svc_start() {
     if command -v rc-service >/dev/null 2>&1; then
-        rc-service "$SVC" stop >/dev/null 2>&1
+        rc-service "$SVC" start >/dev/null 2>&1
     else
-        systemctl stop "$SVC" 2>/dev/null
+        systemctl start "$SVC" >/dev/null 2>&1
     fi
 }
 
-svc_start() {
-    if command -v rc-service >/dev/null 2>&1; then
-        rc-service "$SVC" start
-    else
-        systemctl start "$SVC"
-    fi
+control_field() {
+    sed -n "s/^$1=//p" "$CONTROL" 2>/dev/null | head -n 1
+}
+
+write_control() { # $1 = mode, $2 = pwm (empty for auto), $3 = source
+    mode=$1; pwm=$2; source=$3
+    mkdir -p "$CONTROL_DIR" || { echo "error: cannot create $CONTROL_DIR"; exit 1; }
+    tmp="$CONTROL_DIR/.control.$$"
+    {
+        echo "mode=$mode"
+        [ -n "$pwm" ] && echo "pwm=$pwm"
+        echo "source=$source"
+        echo "updated=$(date +%s)"
+    } > "$tmp" || exit 1
+    mv "$tmp" "$CONTROL" || exit 1
 }
 
 set_ch() { # $1 = channel, $2 = percent
     ch=$1; pct=$2
     [ "$ch" -ge 1 ] && [ "$ch" -le 8 ] || { echo "error: channel 1-8 expected, got '$ch'"; exit 1; }
-    [ "$pct" -le 100 ] || { echo "error: percent 0-100 expected, got '$pct'"; exit 1; }
-    # stop the daemon first, otherwise it overwrites pwm2 within 2 seconds
-    svc_running && svc_stop
-    echo 1 > "$HWMON_NCT/pwm${ch}_enable"          # manual mode
-    echo $(( pct * 255 / 100 )) > "$HWMON_NCT/pwm$ch"  # percent -> duty 0-255
+    [ "$pct" -ge 0 ] && [ "$pct" -le 100 ] || { echo "error: percent 0-100 expected, got '$pct'"; exit 1; }
+
+    duty=$(( pct * 255 / 100 ))
+
+    if [ "$ch" = "$MAIN_CH" ]; then
+        # The daemon applies this and keeps ownership of pwm2.
+        write_control manual "$duty" cli
+        svc_running || svc_start
+        sleep 1
+        echo "pwm$ch set to ${pct}% (control=manual, $(cat "$HWMON_NCT/pwm$ch")/255, $(cat "$HWMON_NCT/fan${ch}_input" 2>/dev/null || echo '?') rpm)"
+        echo "back to automatic: doas fan auto"
+        return
+    fi
+
+    # The daemon only manages CPU_FAN1; J4003 channels are written directly.
+    echo 1 > "$HWMON_NCT/pwm${ch}_enable"
+    echo "$duty" > "$HWMON_NCT/pwm$ch"
     sleep 1
     echo "pwm$ch set to ${pct}% ($(cat "$HWMON_NCT/pwm$ch")/255, $(cat "$HWMON_NCT/fan${ch}_input" 2>/dev/null || echo '?') rpm)"
-    echo "back to automatic (CPU_FAN1): doas fan auto"
 }
 
 case "$1" in
     ""|status)
         HWMON_AMD=$(grep -l amdgpu /sys/class/hwmon/hwmon*/name 2>/dev/null | head -1 | xargs dirname)
-        [ -n "$HWMON_AMD" ] && printf "gpu edge : %s C\n" "$(( $(cat "$HWMON_AMD/temp1_input") / 1000 ))"
+        HWMON_CPU=$(grep -l k10temp /sys/class/hwmon/hwmon*/name 2>/dev/null | head -1 | xargs dirname)
+        if [ -n "$HWMON_AMD" ]; then
+            printf "gpu edge : %s C\n" "$(( $(cat "$HWMON_AMD/temp1_input") / 1000 ))"
+        elif [ -n "$HWMON_CPU" ]; then
+            printf "cpu tctl : %s C\n" "$(( $(cat "$HWMON_CPU/temp1_input") / 1000 ))"
+        fi
         for ch in 1 2 3 4 5 6 7 8; do
             pwm=$(cat "$HWMON_NCT/pwm$ch" 2>/dev/null) || continue
             rpm=$(cat "$HWMON_NCT/fan${ch}_input" 2>/dev/null)
@@ -76,10 +107,28 @@ case "$1" in
             printf "pwm%s (%-9s): %3s/255 (%2d%%)%s rpm=%-6s enable=%s\n" \
                 "$ch" "$label" "$pwm" "$(( pwm * 100 / 255 ))" "$( [ "$rpm" != "0" ] && echo "" || echo "   ")" "$rpm" "$en"
         done
-        svc_running && echo "mode: curve daemon running (pwm$MAIN_CH)" || echo "mode: manual"
+        if svc_running; then
+            mode=$(control_field mode)
+            source=$(control_field source)
+            [ -n "$mode" ] || mode=auto
+            [ -n "$source" ] || source=curve
+            if [ "$mode" = "manual" ] && [ "$source" = "decky" ]; then
+                updated=$(control_field updated)
+                now=$(date +%s)
+                case "$updated" in
+                    ''|*[!0-9]*) mode="auto (invalid decky heartbeat)" ;;
+                    *) [ $((now - updated)) -le "${BC250_FAN_CONTROL_TTL:-5}" ] || mode="auto (stale decky heartbeat)" ;;
+                esac
+            fi
+            echo "mode: curve daemon running (pwm$MAIN_CH, control=$mode/$source)"
+        else
+            echo "mode: manual (curve daemon stopped)"
+        fi
         ;;
     auto)
-        svc_start && echo "fan curve daemon started"
+        write_control auto "" cli
+        svc_running || svc_start
+        echo "automatic fan curve enabled"
         ;;
     [0-9]*)
         if [ -n "$2" ]; then

@@ -7,9 +7,14 @@
 # The J4003 multi-fan header pins map to pwm1 and pwm3-pwm5; this daemon
 # only manages CPU_FAN1 (pwm2) and leaves the other channels alone.
 #
+# This daemon is the only writer of pwm2.  Manual requests from the fan CLI
+# and from the Steam Headless Decky plugin are delivered through
+# /run/bc250-fan/control.  A Decky request is a heartbeat: if it is older than
+# BC250_FAN_CONTROL_TTL seconds (default 5), the daemon returns to this curve.
+# A CLI request (source=cli) is sticky until `fan auto`.
+#
 # Run this daemon under an init system (OpenRC unit in init/, systemd unit
-# in init/) and it maps the GPU edge temperature to a PWM duty cycle every
-# 2 seconds.
+# in init/).  It maps the GPU edge temperature to a PWM duty cycle every 1 s.
 #
 # Manual override: fan <0-100>   (see scripts/fan)
 # Back to auto:    fan auto
@@ -17,16 +22,55 @@
 # Locate hwmon devices dynamically (numbering changes between boots):
 # - amdgpu hwmon: temp1_input = GPU edge temperature, millidegrees C
 # - nct6686 hwmon: pwm2 controls the CPU_FAN1 header, fan2_input reads RPM
-HWMON_AMD=$(grep -l amdgpu /sys/class/hwmon/hwmon*/name | head -1 | xargs dirname)
-HWMON_NCT=$(grep -l nct6686 /sys/class/hwmon/hwmon*/name | head -1 | xargs dirname)
+HWMON_AMD=$(grep -l amdgpu /sys/class/hwmon/hwmon*/name 2>/dev/null | head -1 | xargs dirname)
+HWMON_CPU=$(grep -l k10temp /sys/class/hwmon/hwmon*/name 2>/dev/null | head -1 | xargs dirname)
+HWMON_NCT=$(grep -l nct6686 /sys/class/hwmon/hwmon*/name 2>/dev/null | head -1 | xargs dirname)
+[ -n "$HWMON_AMD" ] || HWMON_AMD="$HWMON_CPU"
 [ -z "$HWMON_AMD" ] || [ -z "$HWMON_NCT" ] && exit 1
 
 PWM="$HWMON_NCT/pwm2"
 EN="$HWMON_NCT/pwm2_enable"   # 1 = manual, 2 = BIOS/auto
 RPM="$HWMON_NCT/fan2_input"
 TEMP="$HWMON_AMD/temp1_input"
-# Make sure the PWM channel is in manual mode (daemon owns it now)
-[ "$(cat "$EN")" = "1" ] && echo 1 > "$EN"
+
+CONTROL_DIR=${BC250_FAN_CONTROL_DIR:-/run/bc250-fan}
+CONTROL="$CONTROL_DIR/control"
+CONTROL_TTL=${BC250_FAN_CONTROL_TTL:-5}
+
+mkdir -p "$CONTROL_DIR" || exit 1
+
+# This daemon owns CPU_FAN1.  Do not leave it in BIOS/auto mode where the
+# board firmware could overwrite our duty cycle.
+echo 1 > "$EN" || exit 1
+
+control_field() {
+    sed -n "s/^$1=//p" "$CONTROL" 2>/dev/null | head -n 1
+}
+
+# Print a valid manual PWM if the host should override the curve.
+# Return 1 for auto, stale Decky heartbeat, or malformed input.
+manual_pwm() {
+    [ -r "$CONTROL" ] || return 1
+    mode=$(control_field mode)
+    [ "$mode" = "manual" ] || return 1
+    pwm=$(control_field pwm)
+    case "$pwm" in
+        ''|*[!0-9]*) return 1 ;;
+    esac
+    [ "$pwm" -le 255 ] || return 1
+
+    source=$(control_field source)
+    if [ "$source" = "decky" ]; then
+        updated=$(control_field updated)
+        case "$updated" in
+            ''|*[!0-9]*) return 1 ;;
+        esac
+        now=$(date +%s)
+        [ $((now - updated)) -le "$CONTROL_TTL" ] || return 1
+    fi
+
+    printf '%s\n' "$pwm"
+}
 
 # Temperature (integer °C) -> PWM duty (0-255).
 # Edit these numbers to taste: left side = temp thresholds,
@@ -44,10 +88,24 @@ curve() {
     fi
 }
 
-# Main loop: read GPU temp, clamp to the curve, write PWM every 1 s.
-# Emergency override: at 95°C+ force 100% regardless of the curve.
+# Main loop: a fresh manual request wins; otherwise read GPU temp and apply
+# the curve.  Emergency override: at 95°C+ force 100% regardless.
 while :; do
-    t=$(( $(cat "$TEMP") / 1000 ))
-    [ "$t" -gt 95 ] && echo 255 > "$PWM" || echo "$(curve "$t")" > "$PWM"
+    if pwm=$(manual_pwm); then
+        echo "$pwm" > "$PWM"
+    else
+        raw=$(cat "$TEMP" 2>/dev/null) || raw=""
+        if [ -z "$raw" ]; then
+            # Never leave the fan at an unknown low value if the sensor dies.
+            echo 255 > "$PWM"
+        else
+            t=$(( raw / 1000 ))
+            if [ "$t" -ge 95 ]; then
+                echo 255 > "$PWM"
+            else
+                echo "$(curve "$t")" > "$PWM"
+            fi
+        fi
+    fi
     sleep 1
 done

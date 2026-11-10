@@ -55,7 +55,7 @@ fan status
 ## Usage
 
 ```sh
-doas fan 95        # CPU_FAN1 to 95% — automatically stops the curve daemon
+doas fan 95        # CPU_FAN1 to 95% — sent to the curve daemon
 doas fan 40        # quiet mode
 doas fan status    # all channels: PWM / RPM / mode
 doas fan auto      # hand CPU_FAN1 back to the curve daemon
@@ -67,6 +67,41 @@ Watch it live:
 ```sh
 watch -n 1 'fan status'
 ```
+
+## Single-writer fan arbiter
+
+`bc250-fan-curve` is the only process that writes `pwm2`. The CLI and the
+Decky plugin send requests through `/run/bc250-fan/control`:
+
+```text
+mode=manual
+pwm=128
+source=cli
+updated=1762770000
+```
+
+- `source=cli` is sticky until `fan auto` writes `mode=auto`.
+- `source=decky` is a heartbeat. The daemon applies it only while `updated` is
+  at most 5 seconds old (`BC250_FAN_CONTROL_TTL` overrides the timeout).
+- A missing or malformed file, `mode=auto`, or a stale Decky heartbeat returns
+  CPU_FAN1 to the GPU-edge curve.
+- The daemon sets `pwm2_enable=1` itself and never stops when a manual request
+  arrives. There is no race between the CLI, the Decky plugin and the curve.
+
+The file is created at boot by the init unit (`RuntimeDirectory` on systemd,
+`start_pre` on OpenRC). The Steam Headless container bind-mounts
+`/run/bc250-fan` read-write and the `fantastic-bc250` Decky plugin uses the
+same protocol.
+
+## Steam Headless BC-250 Decky plugin
+
+The [steam-headless-bc250](https://github.com/Naster17/steam-headless-bc250)
+image ships a BC-250 fork of [Fantastic](https://github.com/NGnius/Fantastic)
+as `plugins/fantastic-bc250`. It is seeded into Decky on first boot and is
+disabled by default; the host curve remains authoritative until the custom
+curve is enabled in the Quick Access Menu. The plugin reads the GPU edge
+temperature and CPU_FAN1 RPM through the container's read-only sysfs view and
+sends the same manual heartbeat described above.
 
 ## Fan channels on the board
 
@@ -126,7 +161,9 @@ PWM duty does **not** survive a reboot by itself — that is what the daemon ser
 - **`error: nct6686 hwmon not found`** — the `nct6687` module is not loaded. Check `lsmod | grep nct6687` and `dmesg | tail`. Remember it needs `force=true`.
 - **`nct6683` and `nct6687` must never be loaded together** — they fight over the same chip. `install.sh` blacklists `nct6683`.
 - **Fedora: "kernel headers not found"** — the running kernel and `kernel-devel` must match: `sudo dnf install kernel-devel-$(uname -r)`. After a kernel update, rebuild the module (rerun `install.sh`).
-- **Fan ignores manual PWM** — make sure the curve daemon is stopped (`fan 60` does this for you) and `pwmX_enable` is `1`.
+- **Fan ignores manual PWM** — check that `bc250-fan-curve` is running and that
+  `/run/bc250-fan/control` has `mode=manual` with a fresh `source=decky`
+  heartbeat or a sticky `source=cli`; `fan status` prints the active mode.
 - **PWM resets after suspend/resume** — restart the service, or add it to your resume hooks.
 - More board-specific issues: [AMD BC250 Documentation — Troubleshooting](https://elektricm.github.io/amd-bc250-docs/troubleshooting/boot/).
 

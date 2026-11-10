@@ -1,0 +1,12 @@
+# Changelog
+
+## 0.2.0 - 2026-11-10
+
+- Make `bc250-fan-curve` the single writer of CPU_FAN1 (`pwm2`).
+- Add `/run/bc250-fan/control` arbiter for manual/automatic requests.
+- `fan <percent>` and `fan auto` now update the control file instead of
+  stopping/starting the daemon; J4003 channels remain direct writes.
+- Add `source=decky` heartbeat with a 5 second fail-safe timeout.
+- Add runtime-directory setup to the OpenRC and systemd units.
+- Document the Steam Headless BC-250 `fantastic-bc250` Decky plugin and the
+  shared control protocol.
