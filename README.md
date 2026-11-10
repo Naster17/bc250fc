@@ -85,6 +85,12 @@ updated=1762770000
   at most 5 seconds old (`BC250_FAN_CONTROL_TTL` overrides the timeout).
 - A missing or malformed file, `mode=auto`, or a stale Decky heartbeat returns
   CPU_FAN1 to the GPU-edge curve.
+- The CLI also writes a separate sticky record at `/run/bc250-fan/cli`. The
+  daemon checks it first, so `doas fan 100` and `doas fan auto` outrank a live
+  Decky heartbeat instead of being overwritten one second later.
+- The Decky plugin backend yields when that CLI record exists and disables its
+  output. Enabling the plugin again from the UI removes the record and claims
+  control back.
 - The daemon sets `pwm2_enable=1` itself and never stops when a manual request
   arrives. There is no race between the CLI, the Decky plugin and the curve.
 
@@ -95,7 +101,7 @@ same protocol.
 
 ## Steam Headless BC-250 Decky plugin
 
-The [steam-headless-bc250](https://github.com/Naster17/steam-headless-bc250)
+The [steam-headless-bc250](https://github.com/Naster17/bc250-sh2)
 image ships a BC-250 fork of [Fantastic](https://github.com/NGnius/Fantastic)
 as `plugins/fantastic-bc250`. It is seeded into Decky on first boot and is
 disabled by default; the host curve remains authoritative until the custom

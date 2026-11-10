@@ -31,6 +31,7 @@ SVC=bc250-fan-curve  # the curve daemon (owns pwm2)
 MAIN_CH=2            # CPU_FAN1
 CONTROL_DIR=${BC250_FAN_CONTROL_DIR:-/run/bc250-fan}
 CONTROL="$CONTROL_DIR/control"
+CLI_CONTROL="$CONTROL_DIR/cli"
 
 svc_running() {
     if command -v rc-service >/dev/null 2>&1; then
@@ -48,21 +49,33 @@ svc_start() {
     fi
 }
 
-control_field() {
-    sed -n "s/^$1=//p" "$CONTROL" 2>/dev/null | head -n 1
+record_field() { # $1 = file, $2 = key
+    sed -n "s/^$2=//p" "$1" 2>/dev/null | head -n 1
 }
 
-write_control() { # $1 = mode, $2 = pwm (empty for auto), $3 = source
-    mode=$1; pwm=$2; source=$3
+control_field() {
+    record_field "$CONTROL" "$1"
+}
+
+write_record() { # $1 = file, $2 = mode, $3 = pwm (empty for auto), $4 = source
+    file=$1; mode=$2; pwm=$3; source=$4
     mkdir -p "$CONTROL_DIR" || { echo "error: cannot create $CONTROL_DIR"; exit 1; }
-    tmp="$CONTROL_DIR/.control.$$"
+    tmp="$CONTROL_DIR/.$(basename "$file").$$"
     {
         echo "mode=$mode"
         [ -n "$pwm" ] && echo "pwm=$pwm"
         echo "source=$source"
         echo "updated=$(date +%s)"
     } > "$tmp" || exit 1
-    mv "$tmp" "$CONTROL" || exit 1
+    mv "$tmp" "$file" || exit 1
+}
+
+write_control() { # $1 = mode, $2 = pwm, $3 = source
+    write_record "$CONTROL" "$1" "$2" "$3"
+}
+
+write_cli() { # $1 = mode, $2 = pwm, $3 = source
+    write_record "$CLI_CONTROL" "$1" "$2" "$3"
 }
 
 set_ch() { # $1 = channel, $2 = percent
@@ -73,7 +86,10 @@ set_ch() { # $1 = channel, $2 = percent
     duty=$(( pct * 255 / 100 ))
 
     if [ "$ch" = "$MAIN_CH" ]; then
-        # The daemon applies this and keeps ownership of pwm2.
+        # The daemon applies this and keeps ownership of pwm2.  The CLI record
+        # is sticky and outranks the Decky heartbeat; the plugin backend yields
+        # until the UI explicitly re-enables it.
+        write_cli manual "$duty" cli
         write_control manual "$duty" cli
         svc_running || svc_start
         sleep 1
@@ -121,11 +137,15 @@ case "$1" in
                 esac
             fi
             echo "mode: curve daemon running (pwm$MAIN_CH, control=$mode/$source)"
+            if [ -r "$CLI_CONTROL" ]; then
+                echo "cli override: $(record_field "$CLI_CONTROL" mode)/$(record_field "$CLI_CONTROL" source)"
+            fi
         else
             echo "mode: manual (curve daemon stopped)"
         fi
         ;;
     auto)
+        write_cli auto "" cli
         write_control auto "" cli
         svc_running || svc_start
         echo "automatic fan curve enabled"

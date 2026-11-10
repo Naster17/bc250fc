@@ -35,6 +35,7 @@ TEMP="$HWMON_AMD/temp1_input"
 
 CONTROL_DIR=${BC250_FAN_CONTROL_DIR:-/run/bc250-fan}
 CONTROL="$CONTROL_DIR/control"
+CLI_CONTROL="$CONTROL_DIR/cli"
 CONTROL_TTL=${BC250_FAN_CONTROL_TTL:-5}
 
 mkdir -p "$CONTROL_DIR" || exit 1
@@ -43,13 +44,31 @@ mkdir -p "$CONTROL_DIR" || exit 1
 # board firmware could overwrite our duty cycle.
 echo 1 > "$EN" || exit 1
 
+record_field() { # $1 = file, $2 = key
+    sed -n "s/^$2=//p" "$1" 2>/dev/null | head -n 1
+}
+
 control_field() {
-    sed -n "s/^$1=//p" "$CONTROL" 2>/dev/null | head -n 1
+    record_field "$CONTROL" "$1"
 }
 
 # Print a valid manual PWM if the host should override the curve.
 # Return 1 for auto, stale Decky heartbeat, or malformed input.
 manual_pwm() {
+    # A CLI request is a sticky override.  It must win over a fresh Decky
+    # heartbeat, otherwise the plugin's 1 s write would erase `fan 100`.
+    if [ -r "$CLI_CONTROL" ]; then
+        mode=$(record_field "$CLI_CONTROL" mode)
+        [ "$mode" = "manual" ] || return 1
+        pwm=$(record_field "$CLI_CONTROL" pwm)
+        case "$pwm" in
+            ''|*[!0-9]*) return 1 ;;
+        esac
+        [ "$pwm" -le 255 ] || return 1
+        printf '%s\n' "$pwm"
+        return 0
+    fi
+
     [ -r "$CONTROL" ] || return 1
     mode=$(control_field mode)
     [ "$mode" = "manual" ] || return 1

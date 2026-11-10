@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.2.1 - 2026-11-10
+
+- Add a sticky CLI override record at `/run/bc250-fan/cli`. The daemon reads it
+  before the shared control file, so `doas fan 100` can no longer be erased by
+  a fresh Decky heartbeat.
+- `fan auto` leaves a sticky auto CLI record; the Decky plugin backend yields
+  and stays disabled until it is explicitly enabled again.
+- The plugin's enable path removes the CLI record and claims control back.
+
 ## 0.2.0 - 2026-11-10
 
 - Make `bc250-fan-curve` the single writer of CPU_FAN1 (`pwm2`).
